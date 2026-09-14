@@ -1,0 +1,28 @@
+name: Scrape events
+
+on:
+  schedule:
+    - cron: "0 12 * * *"  # 8am ET / 12pm UTC daily — adjust to taste
+  workflow_dispatch: {}    # lets you trigger manually from the Actions tab
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Run scraper
+        working-directory: scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          EVENTBRITE_TOKEN: ${{ secrets.EVENTBRITE_TOKEN }}
+          MEETUP_API_KEY: ${{ secrets.MEETUP_API_KEY }}
+        run: python main.py
