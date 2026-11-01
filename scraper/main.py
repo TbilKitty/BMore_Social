@@ -4,14 +4,16 @@ from datetime import datetime, timezone
 from supabase import create_client
 
 from config import SUPABASE_URL, SUPABASE_SERVICE_KEY, RADIUS_MILES
-from sources import eventbrite, meetup, template_html_source
+from sources import meetup, tribe_events, ical_feeds
 
-# Register additional scraped sources here as you build them
-# (e.g. from sources import visit_baltimore, bopa)
+# Register additional scraped sources here as you build them.
+# Eventbrite was removed: its public search API was shut down (every request 404s).
+# To add a site that uses "The Events Calendar" WordPress plugin, or any public
+# iCal feed, just add it to TRIBE_SOURCES / ICAL_SOURCES in config.py.
 SOURCES = [
-    eventbrite,
-    meetup,
-    template_html_source,  # inert until configured — see its module docstring
+    tribe_events,
+    ical_feeds,
+    meetup,  # skips itself unless MEETUP_API_KEY is set
 ]
 
 
@@ -41,16 +43,23 @@ def upsert_events(client, events: list[dict]):
         return
 
     now = datetime.now(timezone.utc).isoformat()
-    rows = []
+    rows = {}
     for e in events:
         row = dict(e)
         row["last_seen_at"] = now
-        rows.append(row)
+        prev = rows.get(row["dedupe_key"])
+        if prev:  # same event from two calendars: keep one, merge their tags
+            row["categories"] = sorted(set(prev["categories"]) | set(row["categories"]))
+        rows[row["dedupe_key"]] = row
 
     # Upsert on dedupe_key: re-scraping the same event updates last_seen_at and
     # any changed fields (time moved, description edited) without duplicating it.
-    result = client.table("events").upsert(rows, on_conflict="dedupe_key").execute()
-    print(f"[main] upserted {len(result.data)} events")
+    batch = list(rows.values())
+    total = 0
+    for i in range(0, len(batch), 200):
+        result = client.table("events").upsert(batch[i:i + 200], on_conflict="dedupe_key").execute()
+        total += len(result.data)
+    print(f"[main] upserted {total} events")
 
 
 def main():
