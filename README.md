@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/34249785/README.md)
 # Baltimore Side Quest
 
 Auto-scraped, quiz-matched event discovery for the Baltimore area — no social media required.
@@ -39,7 +40,35 @@ Vercel (hosting, auto-deploys from your GitHub repo), Resend (100 emails/day fre
 8. Merge to `main` — the scrape workflow runs on its schedule (default: daily 8am ET) and
    also on-demand from the Actions tab (`workflow_dispatch`).
 
+## Phone alerts for everyone (ntfy)
+
+Anyone can sign up at **/alerts**: pick interests, distance, free-only, and optional instant
+pings. No account, email or phone number — each person gets a random ntfy topic to subscribe
+to in the free ntfy app, plus a private "change or stop" link (/alerts/manage?token=…) that
+lets them edit, pause, test or unsubscribe (which deletes their row).
+
+- **Weekly** (`push_alerts.py --mode weekly`, run daily by the "Weekly roundups" workflow):
+  everyone who's due gets ONE roundup message about every 7 days, grouped by interest, free
+  events first, with "See all events" and "Change or stop alerts" buttons.
+- **Instant** (opt-in, after each scrape): heads-up pings for new jazz/blues, free or pop-up
+  music, and market events that match the person's interests. Quiet hours 10 PM–8 AM; a
+  repeating event pings once a month; bursts are bundled into one message.
+- **Limits:** the free ntfy.sh server allows ~60 messages then ~1 per 10 s and a daily cap.
+  Sends are paced and stop at `NTFY_DAILY_LIMIT` (default 240); anyone missed goes out on the
+  next day's run. For more subscribers, buy an ntfy plan and set `NTFY_TOKEN` + raise the limit.
+- **Your own feed:** the `NTFY_TOPIC` secret is treated as a subscriber (instant on, the
+  interests in `scraper/config.py`).
+
+Setup: run `supabase/push_alerts.sql` in Supabase → add `SUPABASE_SERVICE_KEY` to Vercel's
+environment variables (server-only; never prefix it with NEXT_PUBLIC_) → redeploy.
+
 ## Adding more local Baltimore sources
+
+Sites that use the WordPress "The Events Calendar" plugin (look for `/events/` pages with
+"« All Events" links) need no code: add them to `TRIBE_SOURCES` in `scraper/config.py`.
+Any public iCal/Google Calendar link goes in `ICAL_SOURCES`.
+
+
 
 `scraper/sources/template_html_source.py` is a working template using `requests` +
 `BeautifulSoup`. Duplicate it per site (Visit Baltimore, BOPA, specific venues), point it
