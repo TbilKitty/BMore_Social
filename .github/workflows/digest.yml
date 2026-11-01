@@ -1,23 +1,49 @@
-name: Send email digest
+name: Weekly roundups
 
+# Trigger DAILY (cron-job.org). Each phone subscriber gets one roundup about every
+# 7 days; running daily spreads sends out and stays inside ntfy's free limits.
+# The email digest only goes out on Mondays.
 on:
   schedule:
-    - cron: "0 13 * * 1"  # Mondays 9am ET / 1pm UTC — adjust to taste
+    - cron: "0 13 * * *"  # backup only
   workflow_dispatch: {}
+
+concurrency:
+  group: weekly-roundups
+  cancel-in-progress: false
 
 jobs:
   digest:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r scraper/requirements.txt
-      - working-directory: scraper
+
+      - name: Phone roundups for everyone who's due
+        working-directory: scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: python push_alerts.py --mode weekly
+
+      - name: Email digest (Mondays only)
+        if: always()
+        working-directory: scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           DIGEST_FROM_EMAIL: ${{ secrets.DIGEST_FROM_EMAIL }}
-        run: python send_digest.py
+        run: |
+          if [ "$(TZ=America/New_York date +%u)" = "1" ]; then
+            python send_digest.py
+          else
+            echo "Not Monday — email digest skipped"
+          fi
