@@ -2,12 +2,17 @@ name: Scrape events
 
 on:
   schedule:
-    - cron: "0 12 * * *"  # 8am ET / 12pm UTC daily — adjust to taste
+    - cron: "0 12 * * *"  # backup only; cron-job.org triggers this on time
   workflow_dispatch: {}    # lets you trigger manually from the Actions tab
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -26,3 +31,13 @@ jobs:
           EVENTBRITE_TOKEN: ${{ secrets.EVENTBRITE_TOKEN }}
           MEETUP_API_KEY: ${{ secrets.MEETUP_API_KEY }}
         run: python main.py
+
+      - name: Instant phone alerts (people who turned them on)
+        working-directory: scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: python push_alerts.py --mode instant
