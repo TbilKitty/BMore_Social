@@ -59,9 +59,14 @@ export default function Home() {
           Auto-scraped things to do around Baltimore, matched to what you're actually into —
           no social media required.
         </p>
-        <Link href="/quiz" className="inline-block px-4 py-2 rounded bg-white text-black font-medium">
-          Take the 60-second quiz to get started
-        </Link>
+        <div className="flex flex-wrap gap-3">
+          <Link href="/quiz" className="inline-block px-4 py-2 rounded bg-white text-black font-medium">
+            Take the 60-second quiz to get started
+          </Link>
+          <Link href="/alerts" className="inline-block px-4 py-2 rounded border border-neutral-600">
+            📲 Get weekly picks on your phone
+          </Link>
+        </div>
       </div>
     );
   }
@@ -75,7 +80,10 @@ export default function Home() {
     <div>
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">Baltimore Side Quest</h1>
-        <Link href="/quiz" className="text-sm underline text-neutral-400">Retake quiz</Link>
+        <div className="flex gap-4 text-sm">
+          <Link href="/alerts" className="underline">📲 Phone alerts</Link>
+          <Link href="/quiz" className="underline text-neutral-400">Retake quiz</Link>
+        </div>
       </div>
       {scored.length === 0 && <p className="text-neutral-400">No upcoming events yet — check back after the next scrape.</p>}
       {scored.map(({ event, match, novelty }) => (
