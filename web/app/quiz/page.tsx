@@ -6,6 +6,10 @@ import { supabase, getOrCreateAnonId } from "@/lib/supabaseClient";
 
 // Must match scraper/config.py CATEGORIES
 const CATEGORIES: [string, string][] = [
+  ["jazz_blues", "Jazz & blues"],
+  ["live_music", "Live music & pop-ups"],
+  ["food_markets", "Food markets"],
+  ["culture", "Culture & festivals"],
   ["bikes", "Biking"],
   ["dance", "Dance"],
   ["outdoor_music", "Outdoor music"],
