@@ -60,8 +60,8 @@ RADIUS_MILES = 35  # what the public site keeps; personal alerts use PERSONAL_RA
 EVENTBRITE_TOKEN = os.environ.get("EVENTBRITE_TOKEN")
 MEETUP_API_KEY = os.environ.get("MEETUP_API_KEY")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+# Database: Google Cloud Firestore. The service-account JSON key goes in the
+# FIREBASE_SERVICE_ACCOUNT secret (see README → "Database (Google Firestore)").
 
 # ---------------------------------------------------------------- event sources
 # Websites running the WordPress "The Events Calendar" plugin. The scraper reads
@@ -114,6 +114,7 @@ NEARBY_PLACES = [
 
 INSTANT_MAX_PER_RUN = 6        # owner: more than this in one run → one combined push
 PUBLIC_INSTANT_MAX = 3         # everyone else
+HISTORY_DAYS = 60             # how long instant-alert history is remembered per person
 INSTANT_REPEAT_DAYS = 30       # a repeating event (weekly jam, Saturday market) pings once a month
 WEEKLY_DAYS_AHEAD = 8
 WEEKLY_EVERY_DAYS = 6.5        # the weekly job runs daily; each person gets one roundup per ~7 days

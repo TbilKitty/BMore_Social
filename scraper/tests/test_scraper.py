@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dedupe
+import main as scraper_main
+from db import MemoryStore, compact
 import push_alerts as pa
 from ical import parse_ics
 from sources import tribe_events
@@ -172,50 +174,8 @@ def test_messages():
 
 
 # ---------------------------------------------------------------- fake db
-class Q:
-    def __init__(self, db, name):
-        self.db, self.name, self.filters, self.op, self.payload = db, name, [], "select", None
-
-    def select(self, *a, **k): return self
-    def order(self, *a, **k): return self
-    def limit(self, *a, **k): return self
-    def gte(self, col, v): self.filters.append(lambda r: (r.get(col) or "") >= v); return self
-    def lte(self, col, v): self.filters.append(lambda r: (r.get(col) or "") <= v); return self
-    def eq(self, col, v): self.filters.append(lambda r: r.get(col) == v); return self
-    def in_(self, col, vs): self.filters.append(lambda r: r.get(col) in vs); return self
-
-    def insert(self, rows):
-        self.op, self.payload = "insert", rows if isinstance(rows, list) else [rows]
-        return self
-
-    def update(self, vals):
-        self.op, self.payload = "update", vals
-        return self
-
-    def execute(self):
-        class R: pass
-        r, table = R(), self.db.setdefault(self.name, [])
-        if self.op == "insert":
-            now = datetime.now(timezone.utc).isoformat()
-            for row in self.payload:
-                table.append({"sent_at": now, "paused": False, **row, "id": row.get("id") or f"r{len(table)}"})
-            r.data = self.payload
-        elif self.op == "update":
-            hit = [x for x in table if all(f(x) for f in self.filters)]
-            for x in hit:
-                x.update(self.payload)
-            r.data = hit
-        else:
-            r.data = [x for x in table if all(f(x) for f in self.filters)]
-        return r
-
-
-class FakeClient:
-    def __init__(self, events, subs):
-        self.db = {"events": events, "push_subscribers": subs, "push_log": []}
-
-    def table(self, name):
-        return Q(self.db, name)
+def FakeClient(events, subs):
+    return MemoryStore(events, subs)
 
 
 def capture(monkeypatch):
@@ -237,11 +197,11 @@ def test_instant_flow(monkeypatch):
     sent.clear()
     pa.run_instant(client, dry_run=False)
     assert sent == []
-    client.db["events"].append(ev(10, "Free Blues Picnic", ["jazz_blues", "free"], days=5))
+    client.events.append(compact(ev(10, "Free Blues Picnic", ["jazz_blues", "free"], days=5)))
     pa.run_instant(client, dry_run=False)
     assert sorted(t for t, _ in sent) == ["t-me", "t-p1"]
     sent.clear()
-    client.db["events"] += [ev(20 + i, f"Pop-up show {chr(65 + i)}", ["live_music", "popup"]) for i in range(8)]
+    client.events += [compact(ev(20 + i, f"Pop-up show {chr(65 + i)}", ["live_music", "popup"])) for i in range(8)]
     pa.run_instant(client, dry_run=False)
     assert len(sent) == 1 and sent[0][1]["title"].startswith("8 new picks")   # bundled; jazz-only person skipped
 
@@ -260,7 +220,7 @@ def test_weekly_due_and_budget(monkeypatch):
     assert len(sent) == 3 and "t-me" not in [t for t, _ in sent] and "t4" not in [t for t, _ in sent]
     first_batch = {t for t, _ in sent}
     sent.clear()
-    client.db["push_log"].clear()          # a new day
+    client.count = 0                       # a new day
     pa.run_weekly(client, dry_run=False)
     assert {t for t, _ in sent} == {"t0", "t1", "t2", "t3", "t5"} - first_batch   # the rest, no repeats
 
@@ -280,3 +240,80 @@ def test_sender_paces_after_burst(monkeypatch):
     for _ in range(4):
         s.send("t", {"title": "x", "message": "y"})
     assert naps == [pa.NTFY_PACE_SECONDS] * 2
+
+
+def test_history_lives_on_subscriber(monkeypatch):
+    capture(monkeypatch)
+    monkeypatch.setattr(pa, "NTFY_TOPIC", None)
+    client = FakeClient(list(EVENTS), [dict(ME, paused=False)])
+    pa.run_instant(client, dry_run=False)
+    sub = client.subs["me"]
+    assert sub["instant_seeded_at"] and "id1" in sub["instant_sent"] and client.count == 1
+
+
+def test_snapshot_keeps_listings_from_a_source_that_was_down():
+    old = [dict(compact(ev(1, "Old jazz", ["jazz_blues"], days=3)), source="bja"),
+           dict(compact(ev(2, "Old market", ["food_markets"], days=3)), source="markets")]
+    new = [dict(ev(3, "New market", ["food_markets"]), source="markets", dedupe_key="k3"),
+           dict(ev(3, "New market", ["culture"]), source="other", dedupe_key="k3")]
+    snap = scraper_main.build_snapshot(new, old)
+    ids = {e["id"] for e in snap}
+    assert ids == {"k3", "id1"}                       # bja was down → kept; markets refreshed
+    assert set(next(e for e in snap if e["id"] == "k3")["categories"]) == {"food_markets", "culture"}
+    store = MemoryStore()
+    store.replace_events(snap)
+    assert [e["id"] for e in store.upcoming_events(NOW.isoformat())] and "raw" in store.events[0]
+
+
+# ------------------------------------------------- Firestore adapter (fake SDK)
+class _Snap:
+    def __init__(self, id, data): self.id, self._d = id, data
+    exists = property(lambda self: self._d is not None)
+    def to_dict(self): return None if self._d is None else dict(self._d)
+
+
+class _Doc:
+    def __init__(self, db, col, id): self.db, self.col, self.id = db, col, id
+    def set(self, data, merge=False): self.db.setdefault(self.col, {})[self.id] = data
+    def update(self, vals): self.db[self.col][self.id].update(vals)
+    def delete(self): self.db.get(self.col, {}).pop(self.id, None)
+    def get(self): return _Snap(self.id, self.db.get(self.col, {}).get(self.id))
+
+
+class _Col:
+    def __init__(self, db, name, filters=()): self.db, self.name, self.filters = db, name, list(filters)
+    def document(self, id=None): return _Doc(self.db, self.name, id or f"auto{len(self.db.get(self.name, {}))}")
+    def list_documents(self): return [_Doc(self.db, self.name, k) for k in self.db.get(self.name, {})]
+    def where(self, f, op, v): return _Col(self.db, self.name, self.filters + [(f, v)])
+    def limit(self, n): return self
+    def stream(self):
+        return [_Snap(k, d) for k, d in self.db.get(self.name, {}).items()
+                if all(d.get(f) == v for f, v in self.filters)]
+
+
+class _Batch:
+    def __init__(self): self.ops = []
+    def set(self, ref, data): self.ops.append(lambda: ref.set(data))
+    def delete(self, ref): self.ops.append(ref.delete)
+    def commit(self): [op() for op in self.ops]
+
+
+class _Client:
+    def __init__(self): self.db = {}
+    def collection(self, name): return _Col(self.db, name)
+    def batch(self): return _Batch()
+
+
+def test_firestore_store_roundtrip(monkeypatch):
+    from db import FirestoreStore
+    import db as dbmod
+    monkeypatch.setattr(dbmod, "CHUNK_SIZE", 3)
+    st = FirestoreStore(_Client())
+    st.replace_events([ev(i, f"E{i}", ["culture"], days=1 + i) for i in range(7)])
+    assert sorted(st.c.db["snapshot"]) == ["chunk-0", "chunk-1", "chunk-2"]
+    assert len(st.upcoming_events(NOW.isoformat())) == 7
+    st.replace_events([ev(1, "Only", ["culture"])])
+    assert list(st.c.db["snapshot"]) == ["chunk-0"]              # stale chunks removed
+    sid = st.add_subscriber({"topic": "t", "paused": False})
+    st.update_subscriber(sid, {"instant": True})
+    assert st.subscriber_with_topic("t")["instant"] and len(st.active_subscribers()) == 1

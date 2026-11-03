@@ -1,7 +1,6 @@
 "use client";
 
 import { googleCalendarUrl, outlookCalendarUrl, buildIcsDataUrl } from "@/lib/calendar";
-import { supabase, getOrCreateAnonId } from "@/lib/supabaseClient";
 
 export default function EventCard({
   event,
@@ -16,9 +15,11 @@ export default function EventCard({
 }) {
   async function setStatus(status: "saved" | "attended" | "not_for_me") {
     if (!profileId) return;
-    await supabase
-      .from("interactions")
-      .upsert({ profile_id: profileId, event_id: event.id, status }, { onConflict: "profile_id,event_id" });
+    await fetch("/api/interactions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event_id: event.id, status, categories: event.categories || [] }),
+    }).catch(() => null);
   }
 
   return (

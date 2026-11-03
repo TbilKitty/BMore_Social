@@ -9,9 +9,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import requests
-from supabase import create_client
-
-from config import SUPABASE_URL, SUPABASE_SERVICE_KEY
+from db import get_store
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 FROM_EMAIL = os.environ.get("DIGEST_FROM_EMAIL", "digest@yourdomain.com")
@@ -51,34 +49,23 @@ def send_email(to_email: str, html: str):
 
 
 def main():
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY and RESEND_API_KEY):
-        print("[digest] missing SUPABASE_URL / SUPABASE_SERVICE_KEY / RESEND_API_KEY, aborting")
+    store = get_store()
+    if not (store and RESEND_API_KEY):
+        print("[digest] missing FIREBASE_SERVICE_ACCOUNT / RESEND_API_KEY, skipping")
         return
 
-    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
     now = datetime.now(timezone.utc)
-    horizon = (now + timedelta(days=14)).isoformat()
-    events = client.table("events").select("*") \
-        .gte("start_time", now.isoformat()).lte("start_time", horizon).execute().data
+    events = store.upcoming_events(now.isoformat(), (now + timedelta(days=14)).isoformat())
 
-    profiles = client.table("profiles").select("*").eq("email_subscribed", True).execute().data
-
-    for profile in profiles:
+    for profile in store.email_profiles():
         if not profile.get("email"):
             continue
-
-        seen_ids = {
-            i["event_id"] for i in
-            client.table("interactions").select("event_id").eq("profile_id", profile["id"]).execute().data
-        }
+        seen_ids = store.interacted_event_ids(profile["id"])
         weights = profile.get("category_weights") or {}
 
         candidates = [e for e in events if e["id"] not in seen_ids]
-        scored = [(e, match_score(e["categories"], weights)) for e in candidates]
-        top = [e for e, score in scored if score >= MATCH_THRESHOLD]
+        top = [e for e in candidates if match_score(e["categories"], weights) >= MATCH_THRESHOLD]
         top.sort(key=lambda e: e["start_time"])
-
         if not top:
             continue
 

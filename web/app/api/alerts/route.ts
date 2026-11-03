@@ -2,7 +2,7 @@
 // the person gets a random ntfy topic to subscribe to, plus a private link to change or stop.
 import { NextResponse } from "next/server";
 import { randomBytes, createHash } from "crypto";
-import { adminClient } from "@/lib/supabaseAdmin";
+import { countSent, db, hashSalt } from "@/lib/db";
 import { cleanPrefs, sendPush, manageUrl } from "@/lib/alerts";
 
 export const dynamic = "force-dynamic";
@@ -19,38 +19,41 @@ export async function POST(req: Request) {
   const prefs = cleanPrefs(body);
   if (typeof prefs === "string") return NextResponse.json({ error: prefs }, { status: 400 });
 
-  const db = adminClient();
+  const subs = db().collection("push_subscribers");
 
   // Stop bulk fake sign-ups (they'd eat the daily notification allowance meant for real people).
   const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "unknown";
-  const signup_fingerprint = createHash("sha256")
-    .update(ip + (process.env.SUPABASE_SERVICE_KEY || "").slice(-16))
-    .digest("hex")
-    .slice(0, 32);
+  const signup_fingerprint = createHash("sha256").update(ip + hashSalt().slice(-16)).digest("hex").slice(0, 32);
   const hourAgo = new Date(Date.now() - 3600_000).toISOString();
   const dayAgo = new Date(Date.now() - 86400_000).toISOString();
-  const [{ count: mine }, { count: today }] = await Promise.all([
-    db.from("push_subscribers").select("id", { count: "exact", head: true })
-      .eq("signup_fingerprint", signup_fingerprint).gte("created_at", hourAgo),
-    db.from("push_subscribers").select("id", { count: "exact", head: true }).gte("created_at", dayAgo),
-  ]);
-  if ((mine ?? 0) >= 5) {
-    return NextResponse.json({ error: "Too many sign-ups from this connection. Try again in an hour." }, { status: 429 });
-  }
-  if ((today ?? 0) >= 300) {
-    return NextResponse.json({ error: "Lots of sign-ups today! Please try again tomorrow." }, { status: 503 });
+  try {
+    const [fromHere, today] = await Promise.all([
+      subs.where("signup_fingerprint", "==", signup_fingerprint).get(),
+      subs.where("created_at", ">=", dayAgo).count().get(),
+    ]);
+    const mine = fromHere.docs.filter((d) => String(d.get("created_at") || "") >= hourAgo).length;
+    if (mine >= 5) {
+      return NextResponse.json({ error: "Too many sign-ups from this connection. Try again in an hour." }, { status: 429 });
+    }
+    if (today.data().count >= 300) {
+      return NextResponse.json({ error: "Lots of sign-ups today! Please try again tomorrow." }, { status: 503 });
+    }
+  } catch (err) {
+    console.error("alerts signup check failed", err);
+    return NextResponse.json({ error: "Sign-up is temporarily unavailable. Please try again later." }, { status: 500 });
   }
 
   const topic = "bsq-" + randomBytes(9).toString("hex");
   const manage_token = randomBytes(24).toString("base64url");
+  const now = new Date().toISOString();
 
-  const { data, error } = await db
-    .from("push_subscribers")
-    .insert({ topic, manage_token, signup_fingerprint, ...prefs })
-    .select("id")
-    .single();
-  if (error || !data) {
-    console.error("alerts signup failed", error);
+  try {
+    await subs.add({
+      topic, manage_token, signup_fingerprint, ...prefs,
+      paused: false, is_owner: false, created_at: now, updated_at: now,
+    });
+  } catch (err) {
+    console.error("alerts signup failed", err);
     return NextResponse.json({ error: "Sign-up is temporarily unavailable. Please try again later." }, { status: 500 });
   }
 
@@ -61,7 +64,7 @@ export async function POST(req: Request) {
     "Your Baltimore picks will arrive here about once a week. Use the button below anytime to change your interests or stop.",
     manage_token
   );
-  if (ok) await db.from("push_log").insert({ subscriber_id: data.id, kind: "welcome" });
+  if (ok) await countSent().catch(() => null);
 
   return NextResponse.json({ topic, manage_url: manageUrl(manage_token) });
 }
