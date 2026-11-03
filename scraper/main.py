@@ -1,9 +1,8 @@
 import sys
 from datetime import datetime, timezone
 
-from supabase import create_client
-
-from config import SUPABASE_URL, SUPABASE_SERVICE_KEY, RADIUS_MILES
+from config import RADIUS_MILES
+from db import get_store
 from sources import meetup, tribe_events, ical_feeds
 
 # Register additional scraped sources here as you build them.
@@ -37,43 +36,44 @@ def within_radius(event: dict) -> bool:
     return dist is None or dist <= RADIUS_MILES
 
 
-def upsert_events(client, events: list[dict]):
-    if not events:
-        print("[main] no events to upsert")
-        return
-
-    now = datetime.now(timezone.utc).isoformat()
+def merge_duplicates(events: list[dict]) -> list[dict]:
     rows = {}
     for e in events:
-        row = dict(e)
-        row["last_seen_at"] = now
+        row = dict(e, id=e["dedupe_key"])
         prev = rows.get(row["dedupe_key"])
         if prev:  # same event from two calendars: keep one, merge their tags
             row["categories"] = sorted(set(prev["categories"]) | set(row["categories"]))
         rows[row["dedupe_key"]] = row
+    return list(rows.values())
 
-    # Upsert on dedupe_key: re-scraping the same event updates last_seen_at and
-    # any changed fields (time moved, description edited) without duplicating it.
-    batch = list(rows.values())
-    total = 0
-    for i in range(0, len(batch), 200):
-        result = client.table("events").upsert(batch[i:i + 200], on_conflict="dedupe_key").execute()
-        total += len(result.data)
-    print(f"[main] upserted {total} events")
+
+def build_snapshot(new_events: list[dict], previous: list[dict]) -> list[dict]:
+    """This run's events, plus last run's upcoming events from any source that came back
+    empty this time (a site being down for a day shouldn't wipe its listings)."""
+    fresh = merge_duplicates(new_events)
+    seen_sources = {e["source"] for e in new_events}
+    have = {e["id"] for e in fresh}
+    kept = [e for e in previous if e.get("source") not in seen_sources and e["id"] not in have]
+    if kept:
+        print(f"[main] kept {len(kept)} events from sources that returned nothing this run")
+    return fresh + kept
 
 
 def main():
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
-        print("[main] SUPABASE_URL / SUPABASE_SERVICE_KEY not set — printing results instead of upserting")
-        events = [e for e in collect_all_events() if within_radius(e)]
+    store = get_store()
+    events = [e for e in collect_all_events() if within_radius(e)]
+    if store is None:
+        print("[main] FIREBASE_SERVICE_ACCOUNT not set — printing results instead of saving")
         for e in events[:10]:
             print(f"  - {e['title']} ({e['source']}) @ {e['start_time']}")
         print(f"[main] {len(events)} total events found (dry run, nothing written)")
         return
 
-    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    events = [e for e in collect_all_events() if within_radius(e)]
-    upsert_events(client, events)
+    now = datetime.now(timezone.utc).isoformat()
+    previous = store.upcoming_events(now)
+    snapshot = [e for e in build_snapshot(events, previous) if e["start_time"] >= now]
+    n = store.replace_events(snapshot)
+    print(f"[main] saved {n} upcoming events (past events drop off automatically)")
 
 
 if __name__ == "__main__":

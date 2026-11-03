@@ -12,7 +12,7 @@ The free ntfy.sh server allows a burst of ~60 messages, then about 1 every
 anyone not reached today is picked up by tomorrow's run. Set NTFY_TOKEN (a paid
 ntfy plan) and raise NTFY_DAILY_LIMIT if the list outgrows that.
 
-Tables: supabase/push_alerts.sql
+Storage: scraper/db.py (Firestore)
 """
 import argparse
 import re
@@ -24,10 +24,11 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from config import (SUPABASE_URL, SUPABASE_SERVICE_KEY, NTFY_SERVER, NTFY_TOKEN, NTFY_TOPIC, NTFY_DAILY_LIMIT,
+from config import (NTFY_SERVER, NTFY_TOKEN, NTFY_TOPIC, NTFY_DAILY_LIMIT,
                     NTFY_BURST, NTFY_PACE_SECONDS, SITE_URL, PERSONAL_RADIUS_MILES, PERSONAL_CATEGORIES,
                     NEARBY_PLACES, INSTANT_MAX_PER_RUN, PUBLIC_INSTANT_MAX, INSTANT_REPEAT_DAYS,
-                    WEEKLY_DAYS_AHEAD, WEEKLY_EVERY_DAYS, DAYS_AHEAD, QUIET_HOURS)
+                    WEEKLY_DAYS_AHEAD, WEEKLY_EVERY_DAYS, DAYS_AHEAD, QUIET_HOURS, HISTORY_DAYS)
+from db import get_store
 from dedupe import normalize_title
 
 LOCAL = ZoneInfo("America/New_York")
@@ -217,47 +218,28 @@ class Sender:
 
 
 # ---------------------------------------------------------------------- data
-def utc_day_start() -> str:
-    return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def sent_today(client) -> int:
-    # messages actually sent today ('seeded' rows are bookkeeping, not messages)
-    rows = client.table("push_log").select("id").gte("sent_at", utc_day_start()) \
-        .in_("kind", ["weekly", "instant", "welcome", "test"]).limit(100000).execute().data
-    return len(rows)
-
-
-def log(client, rows, dry_run):
-    if dry_run or not rows:
-        return
-    for i in range(0, len(rows), 200):
-        client.table("push_log").insert(rows[i:i + 200]).execute()
-
-
-def load_events(client, days: int) -> list[dict]:
+def load_events(store, days: int) -> list[dict]:
     now = datetime.now(timezone.utc)
-    return client.table("events").select("*") \
-        .gte("start_time", now.isoformat()) \
-        .lte("start_time", (now + timedelta(days=days)).isoformat()) \
-        .order("start_time").limit(3000).execute().data
+    return store.upcoming_events(now.isoformat(), (now + timedelta(days=days)).isoformat())
 
 
-def ensure_owner(client, dry_run) -> None:
-    """The NTFY_TOPIC secret becomes a subscriber row (instant on, your interests)."""
-    if not NTFY_TOPIC:
+def ensure_owner(store, dry_run) -> None:
+    """The NTFY_TOPIC secret becomes a subscriber (instant on, your interests)."""
+    if not NTFY_TOPIC or dry_run or store.subscriber_with_topic(NTFY_TOPIC):
         return
-    found = client.table("push_subscribers").select("id").eq("topic", NTFY_TOPIC).execute().data
-    if found or dry_run:
-        return
-    client.table("push_subscribers").insert({
+    store.add_subscriber({
         "topic": NTFY_TOPIC, "manage_token": secrets.token_urlsafe(24), "categories": PERSONAL_CATEGORIES,
-        "radius_mi": PERSONAL_RADIUS_MILES, "instant": True, "is_owner": True,
-    }).execute()
+        "radius_mi": PERSONAL_RADIUS_MILES, "instant": True, "is_owner": True, "paused": False,
+        "free_only": False, "created_at": now_iso(),
+    })
 
 
-def active_subscribers(client) -> list[dict]:
-    return client.table("push_subscribers").select("*").eq("paused", False).limit(100000).execute().data
+def pruned(history: dict | None, cutoff: str) -> dict:
+    return {k: v for k, v in (history or {}).items() if v >= cutoff}
 
 
 # ------------------------------------------------------------------- weekly
@@ -269,12 +251,12 @@ def is_due(sub, now=None) -> bool:
     return now - datetime.fromisoformat(last.replace("Z", "+00:00")) >= timedelta(days=WEEKLY_EVERY_DAYS)
 
 
-def run_weekly(client, dry_run: bool, sleep=time.sleep) -> int:
-    ensure_owner(client, dry_run)
-    subs = [s for s in active_subscribers(client) if is_due(s)]
+def run_weekly(store, dry_run: bool, sleep=time.sleep) -> int:
+    ensure_owner(store, dry_run)
+    subs = [s for s in store.active_subscribers() if is_due(s)]
     subs.sort(key=lambda s: (not s.get("is_owner"), s.get("last_weekly_at") or ""))  # owner, then longest-waiting
-    events = load_events(client, WEEKLY_DAYS_AHEAD)
-    sender = Sender(sent_today(client), dry_run, sleep)
+    events = load_events(store, WEEKLY_DAYS_AHEAD)
+    sender = Sender(store.sent_today(), dry_run, sleep)
     done = skipped_budget = 0
     now = datetime.now(timezone.utc).isoformat()
     for sub in subs:
@@ -289,8 +271,8 @@ def run_weekly(client, dry_run: bool, sleep=time.sleep) -> int:
             continue
         done += 1
         if not dry_run:
-            client.table("push_subscribers").update({"last_weekly_at": now}).eq("id", sub["id"]).execute()
-            log(client, [{"subscriber_id": sub["id"], "kind": "weekly"}], dry_run)
+            store.update_subscriber(sub["id"], {"last_weekly_at": now})
+            store.add_sent(1)
     print(f"[push] weekly: sent {done} of {len(subs)} due"
           + (f"; {skipped_budget} wait for tomorrow (daily limit)" if skipped_budget else ""))
     return 0
@@ -316,53 +298,67 @@ def pick_instant(events, sub, sent_event_ids: set, recent_title_keys: set) -> li
     return picks
 
 
-def run_instant(client, dry_run: bool, sleep=time.sleep) -> int:
+def run_instant(store, dry_run: bool, sleep=time.sleep) -> int:
     if in_quiet_hours() and not dry_run:
         print("[push] quiet hours — new picks wait for the next daytime run")
         return 0
-    ensure_owner(client, dry_run)
-    subs = [s for s in active_subscribers(client) if s.get("instant")]
+    ensure_owner(store, dry_run)
+    subs = [s for s in store.active_subscribers() if s.get("instant")]
     if not subs:
         print("[push] nobody has instant alerts on")
         return 0
-    events = load_events(client, DAYS_AHEAD)
-    since = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
-    history = client.table("push_log").select("subscriber_id,event_id,title_key,kind,sent_at") \
-        .gte("sent_at", since).in_("kind", ["instant", "seeded"]).limit(200000).execute().data
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=INSTANT_REPEAT_DAYS)).isoformat()
-    sender = Sender(sent_today(client), dry_run, sleep)
-    total = 0
+    events = load_events(store, DAYS_AHEAD)
+    now = datetime.now(timezone.utc)
+    keep_since = (now - timedelta(days=HISTORY_DAYS)).isoformat()
+    cutoff = (now - timedelta(days=INSTANT_REPEAT_DAYS)).isoformat()
+    sender = Sender(store.sent_today(), dry_run, sleep)
+    total = sent_msgs = 0
     for sub in sorted(subs, key=lambda s: not s.get("is_owner")):
-        mine = [h for h in history if h["subscriber_id"] == sub["id"]]
-        picks = pick_instant(events, sub, {h["event_id"] for h in mine},
-                             {h["title_key"] for h in mine if h["sent_at"] >= cutoff})
-        rows = [{"subscriber_id": sub["id"], "event_id": e["id"], "title_key": title_key(e)} for e in picks]
+        sent_events = pruned(sub.get("instant_sent"), keep_since)    # {event_id: when}
+        sent_titles = pruned(sub.get("instant_titles"), keep_since)  # {series title: when}
+        picks = pick_instant(events, sub, set(sent_events),
+                             {k for k, v in sent_titles.items() if v >= cutoff})
+
+        def remember(chosen):
+            stamp = now.isoformat()
+            for e in chosen:
+                sent_events[e["id"]] = stamp
+                sent_titles[title_key(e)] = stamp
+
         if not sub.get("instant_seeded_at"):
             # First run for this person: remember what's already out there instead of flooding them.
             if sub.get("is_owner") and picks:
-                sender.send(sub["topic"], {"title": "Baltimore alerts are on 🎷", "tags": ["tada"],
-                            "message": f"{len(picks)} matching events are already on the calendar — they'll be in "
-                                       "your weekly roundup. From now on you'll get a ping for each new one."})
-            log(client, [{**r, "kind": "seeded"} for r in rows], dry_run)
+                if sender.send(sub["topic"], {"title": "Baltimore alerts are on 🎷", "tags": ["tada"],
+                               "message": f"{len(picks)} matching events are already on the calendar — they'll be "
+                                          "in your weekly roundup. From now on you'll get a ping for each new one."}):
+                    sent_msgs += 1
+            remember(picks)
             if not dry_run:
-                client.table("push_subscribers").update({"instant_seeded_at": datetime.now(timezone.utc).isoformat()}) \
-                    .eq("id", sub["id"]).execute()
+                store.update_subscriber(sub["id"], {"instant_seeded_at": now.isoformat(),
+                                                    "instant_sent": sent_events, "instant_titles": sent_titles})
             continue
         if not picks:
             continue
         limit = INSTANT_MAX_PER_RUN if sub.get("is_owner") else PUBLIC_INSTANT_MAX
         if len(picks) <= limit:
-            sent_rows = [r for e, r in zip(picks, rows) if sender.send(sub["topic"], instant_message(e, sub))]
+            done = [e for e in picks if sender.send(sub["topic"], instant_message(e, sub))]
+            sent_msgs += len(done)
         else:
             lines = [one_line(e) for e in picks[:12]] + ([f"…and {len(picks) - 12} more"] if len(picks) > 12 else [])
             ok = sender.send(sub["topic"], {"title": f"{len(picks)} new picks around Baltimore",
                                             "message": "\n".join(lines), "tags": ["sparkles"], "actions": actions(sub)})
-            sent_rows = rows if ok else []
-        log(client, [{**r, "kind": "instant"} for r in sent_rows], dry_run)
-        total += len(sent_rows)
+            done = picks if ok else []
+            sent_msgs += 1 if ok else 0
+        if done:
+            remember(done)
+            if not dry_run:
+                store.update_subscriber(sub["id"], {"instant_sent": sent_events, "instant_titles": sent_titles})
+        total += len(done)
         if sender.remaining <= 0:
             print("[push] daily limit reached; the rest go out next run")
             break
+    if not dry_run:
+        store.add_sent(sent_msgs)
     print(f"[push] instant: {total} events alerted across {len(subs)} subscribers")
     return 0
 
@@ -382,17 +378,11 @@ def main(argv=None):
             "title": "Test from Baltimore Side Quest ✅", "message": "Your phone alerts are connected.",
             "tags": ["white_check_mark"]})
         return 0
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
-        print("[push] SUPABASE_URL / SUPABASE_SERVICE_KEY not set")
+    store = get_store()
+    if store is None:
+        print("[push] FIREBASE_SERVICE_ACCOUNT secret is not set")
         return 1
-    from supabase import create_client
-    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    try:
-        return run_instant(client, args.dry_run) if args.mode == "instant" else run_weekly(client, args.dry_run)
-    except Exception as ex:
-        if "push_subscribers" in str(ex) or "push_log" in str(ex):
-            print("[push] Alert tables missing — run supabase/push_alerts.sql in the Supabase SQL editor.")
-        raise
+    return run_instant(store, args.dry_run) if args.mode == "instant" else run_weekly(store, args.dry_run)
 
 
 if __name__ == "__main__":

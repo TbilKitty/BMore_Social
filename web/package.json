@@ -8,7 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4",
+    "firebase-admin": "^12.7.0",
     "ics": "^3.7.6",
     "next": "^14.2.15",
     "react": "^18.3.1",

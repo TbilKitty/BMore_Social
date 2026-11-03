@@ -26,8 +26,7 @@ jobs:
       - name: Run scraper
         working-directory: scraper
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           EVENTBRITE_TOKEN: ${{ secrets.EVENTBRITE_TOKEN }}
           MEETUP_API_KEY: ${{ secrets.MEETUP_API_KEY }}
         run: python main.py
@@ -35,9 +34,13 @@ jobs:
       - name: Instant phone alerts (people who turned them on)
         working-directory: scraper
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
           SITE_URL: ${{ vars.SITE_URL }}
         run: python push_alerts.py --mode instant
+
+      - name: Offline tests
+        if: always()
+        working-directory: scraper
+        run: pip install pytest && python -m pytest tests -q

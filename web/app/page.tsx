@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { supabase, getOrCreateAnonId } from "@/lib/supabaseClient";
+import { getOrCreateAnonId } from "@/lib/anon";
 import { matchScore, noveltyScore } from "@/lib/scoring";
 import EventCard from "@/components/EventCard";
 
@@ -14,8 +14,9 @@ export default function Home() {
 
   useEffect(() => {
     (async () => {
-      const anonId = getOrCreateAnonId();
-      const { data: existing } = await supabase.from("profiles").select("*").eq("anon_id", anonId).maybeSingle();
+      getOrCreateAnonId();
+      const me = await fetch("/api/profile").then((r) => r.json()).catch(() => ({ profile: null, interactions: [] }));
+      const existing = me.profile;
       setProfile(existing);
 
       if (!existing) {
@@ -23,27 +24,19 @@ export default function Home() {
         return;
       }
 
-      const { data: interactions } = await supabase
-        .from("interactions")
-        .select("event_id, status, events(categories)")
-        .eq("profile_id", existing.id);
-
-      const seenIds = new Set((interactions || []).map((i: any) => i.event_id));
-      const recent = (interactions || [])
-        .filter((i: any) => i.status === "saved" || i.status === "attended")
-        .map((i: any) => i.events?.categories || [])
+      const interactions: any[] = me.interactions || [];
+      const seenIds = new Set(interactions.map((i) => i.event_id));
+      const recent = interactions
+        .filter((i) => i.status === "saved" || i.status === "attended")
+        .map((i) => i.categories || [])
         .slice(-20);
       setRecentCategories(recent);
 
-      const { data: upcoming } = await supabase
-        .from("events")
-        .select("*")
-        .gte("start_time", new Date().toISOString())
-        .lte("distance_from_baltimore_mi", existing.radius_mi ?? 35)
-        .order("start_time", { ascending: true })
-        .limit(200);
+      const { events: upcoming } = await fetch(`/api/events?radius=${existing.radius_mi ?? 35}`)
+        .then((r) => r.json())
+        .catch(() => ({ events: [] }));
 
-      const filtered = (upcoming || []).filter((e) => !seenIds.has(e.id));
+      const filtered = (upcoming || []).filter((e: any) => !seenIds.has(e.id));
       setEvents(filtered);
       setLoading(false);
     })();

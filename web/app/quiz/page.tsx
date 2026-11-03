@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase, getOrCreateAnonId } from "@/lib/supabaseClient";
+import { getOrCreateAnonId } from "@/lib/anon";
 
 // Must match scraper/config.py CATEGORIES
 const CATEGORIES: [string, string][] = [
@@ -31,20 +31,27 @@ export default function Quiz() {
   const [email, setEmail] = useState("");
   const [subscribe, setSubscribe] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   async function submit() {
     setSaving(true);
-    const anonId = getOrCreateAnonId();
-    await supabase.from("profiles").upsert(
-      {
-        anon_id: anonId,
+    setError("");
+    getOrCreateAnonId();
+    const res = await fetch("/api/profile", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
         category_weights: weights,
         radius_mi: radius,
         email: subscribe ? email : null,
         email_subscribed: subscribe && !!email,
-      },
-      { onConflict: "anon_id" }
-    );
+      }),
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      setSaving(false);
+      setError("Couldn't save your answers. Please try again.");
+      return;
+    }
     router.push("/");
   }
 
@@ -86,6 +93,7 @@ export default function Quiz() {
         )}
       </div>
 
+      {error && <p className="text-red-400 mb-3">{error}</p>}
       <button
         onClick={submit} disabled={saving}
         className="px-4 py-2 rounded bg-white text-black font-medium disabled:opacity-50"

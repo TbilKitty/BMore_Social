@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/34249785/README.md)
 # Baltimore Side Quest
 
 Auto-scraped, quiz-matched event discovery for the Baltimore area — no social media required.
@@ -6,39 +5,51 @@ Auto-scraped, quiz-matched event discovery for the Baltimore area — no social 
 ## How it works
 
 1. **Scraper** (`/scraper`, Python) runs on a schedule via **GitHub Actions**, pulls events
-   from Eventbrite + Meetup APIs and any HTML sources you add, dedupes them, scores them
-   against interest categories, and upserts them into **Supabase** (Postgres).
+   from local event calendars (and Meetup, if configured), dedupes and tags them, and saves the
+   upcoming list to **Google Cloud Firestore**. Past events drop off automatically, so the
+   database stays tiny.
 2. **Web app** (`/web`, Next.js) is a public site: first-time visitors take a short interest
    quiz (stored in a cookie or account), then see a personalized feed with Match + Novelty
    scores. Every event has Save / Attended / Not for me buttons and Google/Apple/Outlook
    calendar links.
-3. **Email digest**: a second scheduled GitHub Action queries Supabase for new
+3. **Email digest**: a second scheduled GitHub Action reads Firestore for new
    high-match events per subscriber and sends a digest via **Resend**.
 
-Everything is free-tier: GitHub Actions (scraping + email cron), Supabase (DB + auth),
+Everything is free-tier: GitHub Actions (scraping + email cron), Firestore (database, free
+quota: 1 GiB stored, 50,000 reads and 20,000 writes a day),
 Vercel (hosting, auto-deploys from your GitHub repo), Resend (100 emails/day free).
 
-## One-time setup
+## Database (Google Firestore) — one-time setup
 
-1. **Push this folder to a new GitHub repo.**
-2. **Supabase**: create a free project at supabase.com → run `supabase/schema.sql` in the
-   SQL editor → copy your Project URL and `service_role` key (scraper) and `anon` key (web).
-3. **Eventbrite**: create a free API key at eventbrite.com/platform/api.
-4. **Meetup**: create an OAuth client at meetup.com/api — the API now requires OAuth, see
-   `scraper/sources/meetup.py` for the token-fetch flow.
-5. **Resend**: create a free account at resend.com, verify a sending domain (or use their
-   test domain while developing), copy your API key.
-6. **GitHub repo secrets** (Settings → Secrets and variables → Actions), add:
-   - `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`
-   - `EVENTBRITE_TOKEN`
-   - `MEETUP_API_KEY` (or OAuth creds per meetup.py)
-   - `RESEND_API_KEY`
-7. **Vercel**: import the repo, set the root directory to `web/`, add env vars
-   `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Deploy — you get a free
-   `*.vercel.app` URL immediately, and can attach a custom domain for free in Vercel's
-   Domains tab if you own one.
-8. Merge to `main` — the scrape workflow runs on its schedule (default: daily 8am ET) and
-   also on-demand from the Actions tab (`workflow_dispatch`).
+1. Go to **console.firebase.google.com**, sign in with your Google account, **Add project**
+   (Google Analytics: off). Stay on the free **Spark** plan.
+2. **Build → Firestore Database → Create database** → *Standard edition*, location
+   `us-east4` (or any US region), **production mode**. Use the *(default)* database — named
+   databases don't get the free quota. Production mode blocks all browser access, which is what
+   we want: only the scraper and the website's server routes touch the data, with the key below.
+3. **Project settings (gear) → Service accounts → Generate new private key**. A `.json` file
+   downloads. Open it and copy **everything** in it.
+4. **GitHub** → this repo → Settings → Secrets and variables → Actions → **New repository
+   secret**: name `FIREBASE_SERVICE_ACCOUNT`, value = the whole JSON.
+5. **Vercel** → the project → Settings → Environment Variables: add `FIREBASE_SERVICE_ACCOUNT`
+   with the same JSON (all environments). Remove the old `NEXT_PUBLIC_SUPABASE_*` and
+   `SUPABASE_*` variables. Redeploy.
+6. **Move existing subscribers over** (only if you used Supabase before): Actions tab →
+   *Move data from Supabase (one time)* → Run workflow. Then run *Scrape events* once.
+7. After a few days of things working, delete the old Supabase project and the `SUPABASE_URL` /
+   `SUPABASE_SERVICE_KEY` repo secrets.
+
+Other optional secrets: `MEETUP_API_KEY`, `RESEND_API_KEY` + `DIGEST_FROM_EMAIL` (email digest),
+`NTFY_TOPIC` (your own phone feed), `NTFY_TOKEN`. Repo variable `SITE_URL`.
+
+### What's stored
+
+| Collection | What | Grows? |
+|---|---|---|
+| `snapshot` | the upcoming events list, rewritten each scrape (~300 events per doc) | no |
+| `push_subscribers` | one doc per phone subscriber, incl. their last 60 days of alert history | per person |
+| `profiles` / `interactions` | quiz answers and Save / Attended / Not for me, per visitor | per person |
+| `meta` | daily push-message count (ntfy's free cap) | one tiny doc a day |
 
 ## Phone alerts for everyone (ntfy)
 
@@ -59,8 +70,7 @@ lets them edit, pause, test or unsubscribe (which deletes their row).
 - **Your own feed:** the `NTFY_TOPIC` secret is treated as a subscriber (instant on, the
   interests in `scraper/config.py`).
 
-Setup: run `supabase/push_alerts.sql` in Supabase → add `SUPABASE_SERVICE_KEY` to Vercel's
-environment variables (server-only; never prefix it with NEXT_PUBLIC_) → redeploy.
+Setup: nothing beyond the Firestore steps above.
 
 ## Adding more local Baltimore sources
 
@@ -85,6 +95,7 @@ car_shows, outdoor_recreation, arts, dog_friendly, family_friendly, unusual.
 ## Local dev
 
 ```
-cd scraper && pip install -r requirements.txt && python main.py   # test a scrape run
+cd scraper && pip install -r requirements.txt && python main.py   # dry run without FIREBASE_SERVICE_ACCOUNT
+python -m pytest tests                                            # offline tests
 cd web && npm install && npm run dev                              # run the site locally
 ```

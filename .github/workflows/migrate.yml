@@ -1,0 +1,23 @@
+name: Move data from Supabase (one time)
+
+# Copies phone subscribers, quiz profiles and saved events from the old Supabase
+# database into Google Firestore. Run once from the Actions tab, then run
+# "Scrape events" to fill in events. Safe to re-run.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r scraper/requirements.txt
+      - working-directory: scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: python migrate_from_supabase.py
